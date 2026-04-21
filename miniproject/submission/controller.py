@@ -2,9 +2,9 @@ import numpy as np
 from miniproject.simulation import MiniprojectSimulation
 from enum import Enum, auto
 
-SHOW_prints = True #enable prints everywhere
+SHOW_PRINTS = True #enable prints everywhere
 print_frequency = 1000 #every x timesteps
-GO_STRAIGHT_THRESHOLD = 5/100 #if the ratio of left_signal to right_signal is within this threshold, go straight
+GO_STRAIGHT_THRESHOLD = 2/100 #if the ratio of left_signal to right_signal is within this threshold, go straight
 
 class State(Enum):
     FOLLOW_SCENT = auto()
@@ -18,17 +18,24 @@ class Controller:
         self.turning_controller = TurningController(sim.timestep)
         self.state = State.FOLLOW_SCENT
         self.show_prints = False
+        # --- EMA Variables ---
+        self.odor_smooth = None
+        self.alpha = 0.0005
 
     def step(self, sim: MiniprojectSimulation, step):
-        if step % print_frequency == 0 and SHOW_prints:
+        if  SHOW_PRINTS and step % print_frequency == 0:
             self.show_prints = True
         else:
             self.show_prints = False
 
-        olfaction = sim.get_olfaction(sim.fly.name)
+        raw_olfaction = sim.get_olfaction(sim.fly.name)
+        if self.odor_smooth is None: # Initialized once
+            self.odor_smooth = raw_olfaction.copy()
+        else:
+            self.odor_smooth = (1 - self.alpha) * self.odor_smooth + (self.alpha * raw_olfaction)
         
         if self.state == State.FOLLOW_SCENT:
-            drives = self.follow_scent(olfaction)
+            drives = self.follow_scent()
         else:
             drives = np.array([0.0, 0.0])
 
@@ -36,22 +43,21 @@ class Controller:
         return joint_angles, adhesion
 
 
-    def follow_scent(self, olfaction):
+    def follow_scent(self):
         
-        left_odor_a = olfaction[0, 0]
-        right_odor_a = olfaction[1, 0]
-        left_odor_b = olfaction[2, 0]
-        right_odor_b = olfaction[3, 0]
+        left_odor_a = self.odor_smooth[0, 0]
+        left_odor_b = self.odor_smooth[2, 0]
+        right_odor_a = self.odor_smooth[1, 0]
+        right_odor_b = self.odor_smooth[3, 0]
 
         left_signal = left_odor_a + left_odor_b
         right_signal = right_odor_a + right_odor_b
         if self.show_prints:
-            print (f"Olfaction: {olfaction}")
+            print (f"Olfaction: {self.odor_smooth}")
             print( f"Left signal: {left_signal}", f"Right signal: {right_signal}")
             print( f"ratio: {left_signal/right_signal}")
-        # get other observations as needed
         
-        if abs(left_signal/right_signal-1)<GO_STRAIGHT_THRESHOLD:
+        if abs(left_signal)/abs(right_signal)-1<GO_STRAIGHT_THRESHOLD:
             if self.show_prints: print("Going straight")
             drives = np.array([2.0, 2.0])
         elif left_signal > right_signal:
