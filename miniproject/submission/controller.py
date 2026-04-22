@@ -41,23 +41,31 @@ class Controller:
         else:
             drives = np.array([0.0, 0.0])
 
-        #######
+        ####### Funny visualization of the fly's retina still doesn't understand how it works but it looks cool and is useful for debugging so here we are #######
         import matplotlib.pyplot as plt
-        ommatidia_readouts = sim.get_ommatidia_readouts(sim.fly.name)
-        print(f"Ommatidia readouts shape: {ommatidia_readouts.shape}")
-        ommatidia_readouts = ommatidia_readouts[0]
-        print(f"Ommatidia readouts shape after indexing: {ommatidia_readouts.shape} ")
-        retina = sim.world.fly_lookup[sim.fly.name].retina
-        img = retina.hex_pxls_to_human_readable(ommatidia_readouts, color_8bit=True)
-        plt.figure()
-        plt.imshow(img[:, :, 0], cmap="gray", vmin=0, vmax=255)
-        plt.title("channel 0")
+        if step % print_frequency == 0:
+            ommatidia_readouts = sim.get_ommatidia_readouts(sim.fly.name)
+            print(f"Ommatidia readouts shape: {ommatidia_readouts.shape}")
+            ommatidia_readouts1 = ommatidia_readouts[0]
+            ommatidia_readouts2 = ommatidia_readouts[1]
+            print(f"Ommatidia readouts shape after indexing: {ommatidia_readouts1.shape} ")
+            retina = sim.world.fly_lookup[sim.fly.name].retina
+            img1 = retina.hex_pxls_to_human_readable(ommatidia_readouts1, color_8bit=True)
+            img2 = retina.hex_pxls_to_human_readable(ommatidia_readouts2, color_8bit=True)
+            fig, ax = plt.subplots(ncols = 2,nrows = 2, figsize=(10, 5) )
+            ax[0, 0].imshow(img1[:, :, 0], cmap="gray", vmin=0, vmax=255)
+            ax[0, 0].set_title("channel 0")
 
-        plt.figure()
-        plt.imshow(img[:, :, 1], cmap="gray", vmin=0, vmax=255)
-        plt.title("channel 1")
-    
-        plt.show()
+            ax[0, 1].imshow(img1[:, :, 1], cmap="gray", vmin=0, vmax=255)
+            ax[0, 1].set_title("channel 1")
+
+            ax[1, 0].imshow(img2[:, :, 0], cmap="gray", vmin=0, vmax=255)
+            ax[1, 0].set_title("channel 0")
+
+            ax[1, 1].imshow(img2[:, :, 1], cmap="gray", vmin=0, vmax=255)
+            ax[1, 1].set_title("channel 1")
+
+            plt.show()
         ######
         joint_angles, adhesion = self.turning_controller.step(drives)
         return joint_angles, adhesion
