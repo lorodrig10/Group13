@@ -42,7 +42,7 @@ class Controller:
             drives = np.array([0.0, 0.0])
 
         ####### Funny visualization of the fly's retina still doesn't understand how it works but it looks cool and is useful for debugging so here we are #######
-        import matplotlib.pyplot as plt
+        
         if step % print_frequency == 0:
             ommatidia_readouts = sim.get_ommatidia_readouts(sim.fly.name)
             print(f"Ommatidia readouts shape: {ommatidia_readouts.shape}")
