@@ -1,6 +1,8 @@
+from cv2 import data
 import numpy as np
 from miniproject.simulation import MiniprojectSimulation
 from enum import Enum, auto
+from matplotlib import pyplot as plt
 
 SHOW_PRINTS = True #enable prints everywhere
 print_frequency = 1000 #every x timesteps
@@ -39,6 +41,24 @@ class Controller:
         else:
             drives = np.array([0.0, 0.0])
 
+        #######
+        import matplotlib.pyplot as plt
+        ommatidia_readouts = sim.get_ommatidia_readouts(sim.fly.name)
+        print(f"Ommatidia readouts shape: {ommatidia_readouts.shape}")
+        ommatidia_readouts = ommatidia_readouts[0]
+        print(f"Ommatidia readouts shape after indexing: {ommatidia_readouts.shape} ")
+        retina = sim.world.fly_lookup[sim.fly.name].retina
+        img = retina.hex_pxls_to_human_readable(ommatidia_readouts, color_8bit=True)
+        plt.figure()
+        plt.imshow(img[:, :, 0], cmap="gray", vmin=0, vmax=255)
+        plt.title("channel 0")
+
+        plt.figure()
+        plt.imshow(img[:, :, 1], cmap="gray", vmin=0, vmax=255)
+        plt.title("channel 1")
+    
+        plt.show()
+        ######
         joint_angles, adhesion = self.turning_controller.step(drives)
         return joint_angles, adhesion
 
