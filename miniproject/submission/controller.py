@@ -6,13 +6,15 @@ import matplotlib.patches as patches
 
 SHOW_PRINTS = True
 PRINT_FREQ = 1000
-SENSOR_FREQ = 20 
-GO_STRAIGHT_THRESHOLD = 2 / 100
+SENSOR_FREQ = 5 #only run sensor processing every SENSOR_FREQ steps to save computation time
+GO_STRAIGHT_THRESHOLD = 2.5 / 100
 SKY_REGION_RATIO = 0.4 #allow to modify the % of height seen from the sky (the smaller the more high we see)
-BINOCULAR_OVERLAP_RATIO = 0.1 #to avoid looking at the same region with both eyes, which can cause confusion in the obstacle detection
+BINOCULAR_OVERLAP_RATIO = 0.01 #to avoid looking at the same region with both eyes, which can cause confusion in the obstacle detection -> maybe innefective
 EXTERNAL_VISON_RATIO = 0.3  # to avoid looking at fare left and far right, which are less relevant for obstacle detection
 SWEEP_HEIGHT = 20               # Hauteur (en pixels) de chaque bande analysée
 MIN_GRASS_WIDTH = 35            # Largeur minimum (en pixels) pour considérer qu'il y a un obstacle
+MAX_GRASS_WIDTH = 120           # I.e this would be the ground
+NO_OBSTACLE_FOUND = -1
 
 class State(Enum):
     FOLLOW_SCENT = auto()
@@ -30,7 +32,7 @@ class Controller:
         self.show_prints = False
 
         self.odor_smooth = None
-        self.alpha = 0.0005
+        self.alpha = 0.0075 * SENSOR_FREQ  # Smoothing factor for olfaction (adjusted for SENSOR_FREQ)
 
         # self.obstacle_threshold = 0.015
         # self.min_green_height_ratio = 0.10
@@ -207,21 +209,35 @@ class Controller:
                 & (g > b * 1.05)
             )
 
-            obstacle_y = -1     # -1 = no obstacle found
+            obstacle_height = NO_OBSTACLE_FOUND  
             obstacle_width = 0
 
             for y in range(0, target_h, SWEEP_HEIGHT): #sweep the mask from top to bottom with a step of SWEEP_HEIGHT
                 band = green_mask[y:min(y + SWEEP_HEIGHT, target_h), :]
+                col_has_green = np.any(band, axis=0).astype(int)
                 
-                band_width = np.sum(np.any(band, axis=0)) #counts how many green pixel has the current band
+                # 2. Astuce NumPy pour trouver les blocs continus
+                # On rajoute un 0 au début et à la fin pour bien détecter les bords
+                padded = np.pad(col_has_green, (1, 1), 'constant')
+                diffs = np.diff(padded)
+                
+                # 'starts' = index où on passe de 0 à 1
+                starts = np.where(diffs == 1)[0]
+                # 'ends' = index où on passe de 1 à 0
+                ends = np.where(diffs == -1)[0]
+                
+                if len(starts) > 0:
+                    max_continuous_width = np.max(ends - starts)
+                else:
+                    max_continuous_width = 0
 
-                # Si la largeur dépasse notre seuil, on a trouvé le haut de l'obstacle !
-                if band_width >= MIN_GRASS_WIDTH:
-                    obstacle_y = y
-                    obstacle_width = band_width
-                    break # On arrête le balayage pour garder la position la plus haute
+                # 4. Vérification : a-t-on au moins 50 pixels à la suite ?
+                if MIN_GRASS_WIDTH <= max_continuous_width <= MAX_GRASS_WIDTH:
+                    raw_y = y  
+                    obstacle_width = max_continuous_width
+                    break
 
-            heights.append(obstacle_y)
+            heights.append(obstacle_height)
             widths.append(obstacle_width)
             
             if visualize:
@@ -230,7 +246,7 @@ class Controller:
                 debug_info['boxes'].append((0, start_w, target_h, end_w - start_w)) # y, x, h, w
 
         # Appel à la fonction de visualisation si demandé
-        obstacle_found = any(h != -1 for h in heights)
+        obstacle_found = any(h != NO_OBSTACLE_FOUND for h in heights)
         if visualize and obstacle_found:
             self.visualize_detection(debug_info, heights)
 
@@ -248,7 +264,17 @@ class Controller:
             img = debug_info['imgs'][i]
             mask = debug_info['masks'][i]
             box_y, box_x, box_h, box_w = debug_info['boxes'][i]
-            detected_y = heights[i]
+            
+            # --- LA MODIFICATION EST ICI ---
+            # 1. On récupère la hauteur totale de l'image (h)
+            h = img.shape[0]
+            
+            # 2. On inverse le calcul (h - hauteur_robot) pour retrouver le vrai 'Y' de matplotlib
+            if heights[i] != NO_OBSTACLE_FOUND:
+                draw_y = h - heights[i]
+            else:
+                draw_y = NO_OBSTACLE_FOUND
+            # -------------------------------
 
             # --- Ligne 1 : Image originale + Cadre ---
             ax_img = axes[0, i]
@@ -265,19 +291,19 @@ class Controller:
             ax_mask.imshow(mask, cmap='gray', vmin=0, vmax=1)
             ax_mask.set_title(f"{titles[i]} - Masque Vert (Rogné)")
             
-            # Si un obstacle a été trouvé, on dessine la détection
-            if detected_y != -1:
+            # Si un obstacle a été trouvé, on dessine la détection avec draw_y
+            if draw_y != NO_OBSTACLE_FOUND:
                 # Dessin de la bande bleue translucide sur le masque
-                rect_band = patches.Rectangle((0, detected_y), box_w, SWEEP_HEIGHT, 
+                rect_band = patches.Rectangle((0, draw_y), box_w, SWEEP_HEIGHT, 
                                               linewidth=0, facecolor='blue', alpha=0.4)
                 ax_mask.add_patch(rect_band)
                 
                 # Ligne d'indication exacte du haut
-                ax_mask.axhline(detected_y, color='blue', linestyle='-', linewidth=2, 
-                                label=f"Haut détecté (Y={detected_y})")
+                ax_mask.axhline(draw_y, color='blue', linestyle='-', linewidth=2, 
+                                label=f"Haut détecté (Y={draw_y})")
                 
-                # (Optionnel) On reporte aussi la ligne bleue sur l'image originale
-                ax_img.hlines(y=detected_y, xmin=box_x, xmax=box_x+box_w, colors='blue', linewidth=2)
+                # On reporte aussi la ligne bleue sur l'image originale
+                ax_img.hlines(y=draw_y, xmin=box_x, xmax=box_x+box_w, colors='blue', linewidth=2)
                 
                 ax_mask.legend(loc="lower right")
             else:
@@ -291,14 +317,14 @@ class Controller:
         if self.show_prints:
             print(f"AVOID_OBSTACLE: L={left_h:.4f}, R={right_h:.4f}")
 
-        if left_h < right_h:
+        if left_h > right_h:
             if self.show_prints:
                 print("Obstacle à gauche → tourner à droite")
-            return np.array([1.5, 0.2])
+            return np.array([1.5, -0.2])
         else:
             if self.show_prints:
                 print("Obstacle à droite → tourner à gauche")
-            return np.array([0.2, 1.5])
+            return np.array([-0.2, 1.5])
 
     def follow_scent(self):
         left_odor_a = self.odor_smooth[0, 0]
@@ -325,9 +351,9 @@ class Controller:
         elif left_signal > right_signal:
             if self.show_prints:
                 print("FOLLOW_SCENT: turning left")
-            return np.array([0.2, 1.0])
+            return np.array([0.1, 1.0])
 
         else:
             if self.show_prints:
                 print("FOLLOW_SCENT: turning right")
-            return np.array([1.0, 0.2])
+            return np.array([1.0, 0.1])
