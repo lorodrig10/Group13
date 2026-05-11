@@ -12,15 +12,13 @@ SKY_REGION_RATIO = 0.4 #allow to modify the % of height seen from the sky (the s
 BINOCULAR_OVERLAP_RATIO = 0.1 #to avoid looking at the same region with both eyes, which can cause confusion in the obstacle detection
 EXTERNAL_VISON_RATIO = 0.3  # to avoid looking at fare left and far right, which are less relevant for obstacle detection
 SWEEP_HEIGHT = 20               # Hauteur (en pixels) de chaque bande analysée
+MIN_GRASS_WIDTH = 30            # Largeur minimum (en pixels); slightly lower helps thin blades register earlier
 AVOID_HOLD_STEPS = 48           # Continue evasive drive briefly after close grass leaves FOV
 OBSTACLE_ROW_CLOSE = 22         # Row from top of ROI — smaller means obstacle appears larger / closer
 # Grass top row y_top <= limit => threat. Higher fraction => react earlier (larger limit).
 OBSTACLE_THREAT_FRAC_OF_ROI = 0.76
-# Near the odor source the fly often goes straight [2,2]; widen threat so grass lower in the
-# sky ROI still triggers full avoidance (reduces “last spike” face-plants).
+# When olfaction says “go straight” (common near the banana), widen threat so grass lower in the sky ROI still triggers full avoidance.
 OBSTACLE_THREAT_STRAIGHT_FRAC = 0.93
-# Slightly lower width so a thin blade’s top band can register one sweep earlier.
-MIN_GRASS_WIDTH = 30            # Largeur minimum (en pixels) pour considérer qu'il y a un obstacle
 # Grass visible but below threat line: small lateral nudge only (large values erase odor).
 OBSTACLE_SEEN_SOFT_BLEND = 0.14
 # During threat, blend with *pure* follow_scent — not with soft bias (that double-counts avoidance).
@@ -116,8 +114,6 @@ class Controller:
 
         if self.avoid_hold > 0:
             self.state = State.AVOID_OBSTACLE
-            # Grass higher in the sky ROI (small y_top) => physically closer; scale odor blend from that,
-            # not only from the narrow threat limit (fixes weak avoidance on final straight approaches).
             rh = max(float(self._last_roi_h), 1.0)
             closeness = float(np.clip(1.0 - (self._last_y_top / rh), 0.0, 1.0))
             b = AVOID_ODOR_BLEND_AT_BOUNDARY + (
