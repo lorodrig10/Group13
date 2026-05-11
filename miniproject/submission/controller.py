@@ -4,7 +4,7 @@ from enum import Enum, auto
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
-SHOW_PRINTS = True
+SHOW_PRINTS = False
 PRINT_FREQ = 1000
 SENSOR_FREQ = 20 
 GO_STRAIGHT_THRESHOLD = 2 / 100
@@ -12,7 +12,23 @@ SKY_REGION_RATIO = 0.4 #allow to modify the % of height seen from the sky (the s
 BINOCULAR_OVERLAP_RATIO = 0.1 #to avoid looking at the same region with both eyes, which can cause confusion in the obstacle detection
 EXTERNAL_VISON_RATIO = 0.3  # to avoid looking at fare left and far right, which are less relevant for obstacle detection
 SWEEP_HEIGHT = 20               # Hauteur (en pixels) de chaque bande analysée
-MIN_GRASS_WIDTH = 35            # Largeur minimum (en pixels) pour considérer qu'il y a un obstacle
+AVOID_HOLD_STEPS = 48           # Continue evasive drive briefly after close grass leaves FOV
+OBSTACLE_ROW_CLOSE = 22         # Row from top of ROI — smaller means obstacle appears larger / closer
+# Grass top row y_top <= limit => threat. Higher fraction => react earlier (larger limit).
+OBSTACLE_THREAT_FRAC_OF_ROI = 0.76
+# Near the odor source the fly often goes straight [2,2]; widen threat so grass lower in the
+# sky ROI still triggers full avoidance (reduces “last spike” face-plants).
+OBSTACLE_THREAT_STRAIGHT_FRAC = 0.93
+# Slightly lower width so a thin blade’s top band can register one sweep earlier.
+MIN_GRASS_WIDTH = 30            # Largeur minimum (en pixels) pour considérer qu'il y a un obstacle
+# Grass visible but below threat line: small lateral nudge only (large values erase odor).
+OBSTACLE_SEEN_SOFT_BLEND = 0.14
+# During threat, blend with *pure* follow_scent — not with soft bias (that double-counts avoidance).
+# Lower b => more odor in the mix. Still ramp up avoidance when grass is very close (high in ROI).
+AVOID_ODOR_BLEND_AT_BOUNDARY = 0.36
+AVOID_ODOR_BLEND_WHEN_CLOSE = 0.88
+# Head-on: both eyes see similar row — break tie with wider green band per eye.
+BINOCULAR_HEIGHT_TIE_PX = 6
 
 class State(Enum):
     FOLLOW_SCENT = auto()
@@ -30,45 +46,88 @@ class Controller:
         self.show_prints = False
 
         self.odor_smooth = None
-        self.alpha = 0.0005
+        self.alpha = 0.0025
 
         # self.obstacle_threshold = 0.015
         # self.min_green_height_ratio = 0.10
 
-        #UNCOMMENT TO ACTIVATE TIME FOR DETECTION
-        #self.avoid_duration = 300
-        #self.avoid_timer = 0
+        self.avoid_hold = 0
+        self.avoid_drive = np.array([1.5, 0.2])
+        self.follow_drive = np.array([2.0, 2.0])
+        self.follow_pure = np.array([2.0, 2.0])
+        self._last_y_top = 0
+        self._last_roi_h = 1
+        self._seen_soft_active = False
+        self._seen_soft_vec = np.array([2.0, 2.0])
 
     def step(self, sim: MiniprojectSimulation, step):
         self.show_prints = SHOW_PRINTS and step % PRINT_FREQ == 0
 
+        raw_olfaction = sim.get_olfaction(sim.fly.name)
+        if self.odor_smooth is None:
+            self.odor_smooth = raw_olfaction.copy()
+        else:
+            self.odor_smooth = (
+                (1 - self.alpha) * self.odor_smooth
+                + self.alpha * raw_olfaction
+            )
+
         if step % SENSOR_FREQ == 0:
-            raw_olfaction = sim.get_olfaction(sim.fly.name)
-
-            if self.odor_smooth is None:
-                self.odor_smooth = raw_olfaction.copy()
-            else:
-                self.odor_smooth = (
-                    (1 - self.alpha) * self.odor_smooth
-                    + self.alpha * raw_olfaction
-                )
-
-            left_h, right_h, obstacle_found = self.detect_obstacle(sim, visualize=self.show_prints)
+            (
+                left_h,
+                right_h,
+                obstacle_threat,
+                obstacle_seen,
+                y_top,
+                roi_h,
+                left_w,
+                right_w,
+            ) = self.detect_obstacle(sim, visualize=self.show_prints)
 
             if self.show_prints:
                 print(f"Vision obstacle scores: L={left_h:.4f}, R={right_h:.4f}")
 
-            if obstacle_found:
-                self.state = State.AVOID_OBSTACLE
-            else:
-                self.state = State.FOLLOW_SCENT
+            self._last_y_top = y_top
+            self._last_roi_h = roi_h
 
-            if self.state == State.FOLLOW_SCENT:
-                self.drive = self.follow_scent()
-            elif self.state == State.AVOID_OBSTACLE:
-                self.drive = self.avoid_obstacle(left_h, right_h)
+            if obstacle_seen and self._olfaction_straight() and not obstacle_threat:
+                wide_limit = max(int(roi_h * OBSTACLE_THREAT_STRAIGHT_FRAC), 1)
+                if y_top <= wide_limit:
+                    obstacle_threat = True
+
+            if obstacle_seen and not obstacle_threat:
+                self._seen_soft_active = True
+                self._seen_soft_vec = self.avoid_obstacle(
+                    left_h, right_h, left_w, right_w
+                )
             else:
-                self.drive = np.array([0.0, 0.0])
+                self._seen_soft_active = False
+
+            if obstacle_threat:
+                self.avoid_drive = self.avoid_obstacle(left_h, right_h, left_w, right_w)
+                self.avoid_hold = AVOID_HOLD_STEPS
+
+        self.follow_pure = self.follow_scent()
+        s_soft = OBSTACLE_SEEN_SOFT_BLEND if self._seen_soft_active else 0.0
+        self.follow_drive = (1.0 - s_soft) * self.follow_pure + s_soft * self._seen_soft_vec
+
+        if self.avoid_hold > 0:
+            self.avoid_hold -= 1
+
+        if self.avoid_hold > 0:
+            self.state = State.AVOID_OBSTACLE
+            # Grass higher in the sky ROI (small y_top) => physically closer; scale odor blend from that,
+            # not only from the narrow threat limit (fixes weak avoidance on final straight approaches).
+            rh = max(float(self._last_roi_h), 1.0)
+            closeness = float(np.clip(1.0 - (self._last_y_top / rh), 0.0, 1.0))
+            b = AVOID_ODOR_BLEND_AT_BOUNDARY + (
+                AVOID_ODOR_BLEND_WHEN_CLOSE - AVOID_ODOR_BLEND_AT_BOUNDARY
+            ) * closeness
+            # Use follow_pure so odor toward banana is not diluted by soft avoidance twice.
+            self.drive = b * self.avoid_drive + (1.0 - b) * self.follow_pure
+        else:
+            self.state = State.FOLLOW_SCENT
+            self.drive = self.follow_drive
 
         if step > 0 and self.show_prints:
             fly_vision = np.concatenate(sim.get_raw_vision(sim.fly.name), axis=-2)
@@ -229,12 +288,32 @@ class Controller:
                 debug_info['masks'].append(green_mask)
                 debug_info['boxes'].append((0, start_w, target_h, end_w - start_w)) # y, x, h, w
 
-        # Appel à la fonction de visualisation si demandé
-        obstacle_found = any(h != -1 for h in heights)
-        if visualize and obstacle_found:
+        obstacle_seen = any(h != -1 for h in heights)
+        h0 = int(np.asarray(eye_imgs[0]).shape[0])
+        roi_h = max(int(h0 * SKY_REGION_RATIO), 1)
+        y_top = roi_h
+        left_w = widths[0] if len(widths) > 0 else 0
+        right_w = widths[1] if len(widths) > 1 else 0
+
+        obstacle_threat = False
+        if obstacle_seen:
+            y_top = min(h for h in heights if h != -1)
+            limit = max(int(roi_h * OBSTACLE_THREAT_FRAC_OF_ROI), 1)
+            obstacle_threat = y_top <= limit
+
+        if visualize and obstacle_seen:
             self.visualize_detection(debug_info, heights)
 
-        return heights[0], heights[1], obstacle_found
+        return (
+            heights[0],
+            heights[1],
+            obstacle_threat,
+            obstacle_seen,
+            y_top,
+            roi_h,
+            left_w,
+            right_w,
+        )
 
     def visualize_detection(self, debug_info, heights):
         """
@@ -287,18 +366,69 @@ class Controller:
         plt.tight_layout()
         plt.show()
 
-    def avoid_obstacle(self, left_h, right_h):
+    def avoid_obstacle(self, left_h, right_h, left_w=0.0, right_w=0.0):
+        """Turn away from grass. Uses both eyes when possible; handles single-eye detection."""
+        MISSING = -1
+        left_ok = left_h != MISSING
+        right_ok = right_h != MISSING
+
         if self.show_prints:
             print(f"AVOID_OBSTACLE: L={left_h:.4f}, R={right_h:.4f}")
 
-        if left_h < right_h:
+        if left_ok and not right_ok:
+            turn_right = True
             if self.show_prints:
-                print("Obstacle à gauche → tourner à droite")
-            return np.array([1.5, 0.2])
+                print("Obstacle côté œil gauche → tourner à droite")
+        elif right_ok and not left_ok:
+            turn_right = False
+            if self.show_prints:
+                print("Obstacle côté œil droit → tourner à gauche")
+        elif left_ok and right_ok:
+            dh = left_h - right_h
+            if abs(dh) <= BINOCULAR_HEIGHT_TIE_PX:
+                # Head-on: same row in both eyes — height comparison is arbitrary; use width.
+                dw = float(left_w) - float(right_w)
+                if abs(dw) > 2.0:
+                    turn_right = dw > 0.0
+                elif abs(dh) < 1e-6:
+                    # Perfect head-on symmetry; dh < 0 was always False — pick a fixed default.
+                    turn_right = True
+                else:
+                    turn_right = dh < 0.0
+            else:
+                turn_right = left_h < right_h
+            if self.show_prints:
+                print(
+                    "Obstacle binocular → tourner à "
+                    + ("droite" if turn_right else "gauche")
+                )
         else:
-            if self.show_prints:
-                print("Obstacle à droite → tourner à gauche")
-            return np.array([0.2, 1.5])
+            turn_right = True
+
+        ys = [h for h in (left_h, right_h) if h != MISSING]
+        y_near = min(ys) if ys else OBSTACLE_ROW_CLOSE
+        if y_near < OBSTACLE_ROW_CLOSE:
+            fast, slow = 2.25, 0.12
+        elif y_near < OBSTACLE_ROW_CLOSE + 25:
+            fast, slow = 1.75, 0.18
+        else:
+            fast, slow = 1.45, 0.28
+
+        if turn_right:
+            return np.array([fast, slow])
+        return np.array([slow, fast])
+
+    def _olfaction_straight(self):
+        """True when left/right odor balance matches 'go straight' in follow_scent."""
+        left_odor_a = self.odor_smooth[0, 0]
+        left_odor_b = self.odor_smooth[2, 0]
+        right_odor_a = self.odor_smooth[1, 0]
+        right_odor_b = self.odor_smooth[3, 0]
+        left_signal = left_odor_a + left_odor_b
+        right_signal = right_odor_a + right_odor_b
+        eps = 1e-8
+        ratio = abs(left_signal) / (abs(right_signal) + eps)
+        return abs(ratio - 1.0) < GO_STRAIGHT_THRESHOLD
 
     def follow_scent(self):
         left_odor_a = self.odor_smooth[0, 0]
