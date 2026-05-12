@@ -4,15 +4,15 @@ from enum import Enum, auto
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
-SHOW_PRINTS = False
+SHOW_PRINTS = True
 PRINT_FREQ = 1000
-SENSOR_FREQ = 20 
-GO_STRAIGHT_THRESHOLD = 2 / 100
+SENSOR_FREQ = 5 
+GO_STRAIGHT_THRESHOLD = 2.5 / 100
 SKY_REGION_RATIO = 0.4 #allow to modify the % of height seen from the sky (the smaller the more high we see)
-BINOCULAR_OVERLAP_RATIO = 0.1 #to avoid looking at the same region with both eyes, which can cause confusion in the obstacle detection
+BINOCULAR_OVERLAP_RATIO = 0.01 #to avoid looking at the same region with both eyes, -> might be ineffective
 EXTERNAL_VISON_RATIO = 0.3  # to avoid looking at fare left and far right, which are less relevant for obstacle detection
-SWEEP_HEIGHT = 20               # Hauteur (en pixels) de chaque bande analysée
-MIN_GRASS_WIDTH = 30            # Largeur minimum (en pixels); slightly lower helps thin blades register earlier
+SWEEP_HEIGHT = 10               # Hauteur (en pixels) de chaque bande analysée
+MIN_GRASS_WIDTH = 40            # Largeur minimum (en pixels); slightly lower helps thin blades register earlier
 AVOID_HOLD_STEPS = 48           # Continue evasive drive briefly after close grass leaves FOV
 OBSTACLE_ROW_CLOSE = 22         # Row from top of ROI — smaller means obstacle appears larger / closer
 # Grass top row y_top <= limit => threat. Higher fraction => react earlier (larger limit).
@@ -27,6 +27,10 @@ AVOID_ODOR_BLEND_AT_BOUNDARY = 0.36
 AVOID_ODOR_BLEND_WHEN_CLOSE = 0.88
 # Head-on: both eyes see similar row — break tie with wider green band per eye.
 BINOCULAR_HEIGHT_TIE_PX = 6
+
+MAX_GRASS_WIDTH = 200           # I.e this would be the ground
+NO_OBSTACLE_FOUND = -1
+
 
 class State(Enum):
     FOLLOW_SCENT = auto()
@@ -44,10 +48,7 @@ class Controller:
         self.show_prints = False
 
         self.odor_smooth = None
-        self.alpha = 0.0025
-
-        # self.obstacle_threshold = 0.015
-        # self.min_green_height_ratio = 0.10
+        self.alpha = 0.0075 * SENSOR_FREQ  # Smoothing factor for olfaction (adjusted for SENSOR_FREQ)
 
         self.avoid_hold = 0
         self.avoid_drive = np.array([1.5, 0.2])
@@ -137,87 +138,6 @@ class Controller:
 
         return joint_angles, adhesion
 
-    # def detect_obstacle(self, sim):
-    #     """
-    #     Utilise directement les images RGB de sim.get_raw_vision().
-    #     """
-
-    #     eye_imgs = sim.get_raw_vision(sim.fly.name)
-    #     scores = []
-
-    #     for img in eye_imgs:
-    #         img = np.asarray(img)
-
-    #         if img.max() <= 1.0:
-    #             img = img * 255.0
-
-    #         h, w, c = img.shape
-
-    #         sky_region = img[: int(h * self.sky_region_ratio), :, :]
-
-    #         r = sky_region[:, :, 0].astype(float)
-    #         g = sky_region[:, :, 1].astype(float)
-    #         b = sky_region[:, :, 2].astype(float)
-
-    #         green_mask = (
-    #             (g > 90)
-    #             & (g > r * 1.25)
-    #             & (g > b * 1.05)
-    #         )
-
-    #         column_green_ratio = green_mask.mean(axis=0)
-    #         tall_green_columns = column_green_ratio > self.min_green_height_ratio
-
-    #         score = tall_green_columns.mean()
-    #         scores.append(score)
-
-    #     return scores[0], scores[1]
-    # def detect_obstacle(self, sim):
-    #     """
-    #     Utilise directement les images RGB de sim.get_raw_vision() avec 
-    #     des restrictions de champ de vision asymétriques.
-    #     """
-    #     eye_imgs = sim.get_raw_vision(sim.fly.name)
-    #     scores = []
-
-    #     for i, img in enumerate(eye_imgs):
-    #         img = np.asarray(img)
-
-    #         if img.max() <= 1.0:
-    #             img = img * 255.0
-
-    #         h, w, c = img.shape
-
-    #         if i == 0:
-    #             start_w = int(w * EXTERNAL_VISON_RATIO)
-    #             end_w = int(w * (1 - BINOCULAR_OVERLAP_RATIO))
-    #         else:
-    #             start_w = int(w * BINOCULAR_OVERLAP_RATIO)
-    #             end_w = int(w * (1 - EXTERNAL_VISON_RATIO))
-
-    #         target_region = img[: int(h * SKY_REGION_RATIO), start_w:end_w, :]
-
-    #         r = target_region[:, :, 0].astype(float)
-    #         g = target_region[:, :, 1].astype(float)
-    #         b = target_region[:, :, 2].astype(float)
-
-    #         green_mask = (
-    #             (g > 90)
-    #             & (g > r * 1.25)
-    #             & (g > b * 1.05)
-    #         )
-
-    #         column_green_ratio = green_mask.mean(axis=0)
-    #         tall_green_columns = column_green_ratio > self.min_green_height_ratio
-
-    #         if len(tall_green_columns) > 0:
-    #             score = tall_green_columns.mean()
-    #         else:
-    #             score = 0.0
-                
-    #         scores.append(score)
-
-    #     return scores[0], scores[1]
     def detect_obstacle(self, sim, visualize=False):
         """
         Détecte les obstacles verts en balayant l'image de haut en bas.
@@ -262,19 +182,34 @@ class Controller:
                 & (g > b * 1.05)
             )
 
-            obstacle_y = -1     # -1 = no obstacle found
+            obstacle_y = NO_OBSTACLE_FOUND
             obstacle_width = 0
 
             for y in range(0, target_h, SWEEP_HEIGHT): #sweep the mask from top to bottom with a step of SWEEP_HEIGHT
+                #This loop searches for a continous band of horizontal pixels, and consider it as grass if 
+                # its width is between MIN_GRASS_WIDTH and MAX_GRASS_WIDTH
                 band = green_mask[y:min(y + SWEEP_HEIGHT, target_h), :]
                 
-                band_width = np.sum(np.any(band, axis=0)) #counts how many green pixel has the current band
+                col_has_green = np.any(band, axis=0).astype(int)
+                
+                diffs = np.diff(np.pad(col_has_green, (1, 1), 'constant'))
+                
+                starts = np.where(diffs == 1)[0]
+                ends = np.where(diffs == -1)[0]
+                
+                if len(starts) > 0:
+                    max_continuous_width = np.max(ends - starts)
+                else:
+                    max_continuous_width = 0
 
-                # Si la largeur dépasse notre seuil, on a trouvé le haut de l'obstacle !
-                if band_width >= MIN_GRASS_WIDTH:
+                if MIN_GRASS_WIDTH <= max_continuous_width <= MAX_GRASS_WIDTH:
                     obstacle_y = y
-                    obstacle_width = band_width
-                    break # On arrête le balayage pour garder la position la plus haute
+                    obstacle_width = max_continuous_width
+                    break
+
+            if self.show_prints:
+                print(f"Eye {i}: obstacle_y={obstacle_y}, obstacle_width={obstacle_width}")
+                print("ends - starts", ends - starts)
 
             heights.append(obstacle_y)
             widths.append(obstacle_width)
@@ -284,7 +219,7 @@ class Controller:
                 debug_info['masks'].append(green_mask)
                 debug_info['boxes'].append((0, start_w, target_h, end_w - start_w)) # y, x, h, w
 
-        obstacle_seen = any(h != -1 for h in heights)
+        obstacle_seen = any(h != NO_OBSTACLE_FOUND for h in heights)
         h0 = int(np.asarray(eye_imgs[0]).shape[0])
         roi_h = max(int(h0 * SKY_REGION_RATIO), 1)
         y_top = roi_h
@@ -325,33 +260,26 @@ class Controller:
             box_y, box_x, box_h, box_w = debug_info['boxes'][i]
             detected_y = heights[i]
 
-            # --- Ligne 1 : Image originale + Cadre ---
             ax_img = axes[0, i]
             ax_img.imshow(img)
             ax_img.set_title(f"{titles[i]} - Image Originale")
             
-            # Dessin du rectangle rouge pour montrer la zone observée
             rect = patches.Rectangle((box_x, box_y), box_w, box_h, 
                                      linewidth=2, edgecolor='red', facecolor='none', linestyle='--')
             ax_img.add_patch(rect)
             
-            # --- Ligne 2 : Masque Vert + Ligne de détection ---
             ax_mask = axes[1, i]
             ax_mask.imshow(mask, cmap='gray', vmin=0, vmax=1)
             ax_mask.set_title(f"{titles[i]} - Masque Vert (Rogné)")
             
-            # Si un obstacle a été trouvé, on dessine la détection
-            if detected_y != -1:
-                # Dessin de la bande bleue translucide sur le masque
+            if detected_y != NO_OBSTACLE_FOUND:
                 rect_band = patches.Rectangle((0, detected_y), box_w, SWEEP_HEIGHT, 
                                               linewidth=0, facecolor='blue', alpha=0.4)
                 ax_mask.add_patch(rect_band)
                 
-                # Ligne d'indication exacte du haut
                 ax_mask.axhline(detected_y, color='blue', linestyle='-', linewidth=2, 
                                 label=f"Haut détecté (Y={detected_y})")
                 
-                # (Optionnel) On reporte aussi la ligne bleue sur l'image originale
                 ax_img.hlines(y=detected_y, xmin=box_x, xmax=box_x+box_w, colors='blue', linewidth=2)
                 
                 ax_mask.legend(loc="lower right")
@@ -439,9 +367,9 @@ class Controller:
         ratio = abs(left_signal) / (abs(right_signal) + eps)
 
         if self.show_prints:
-            print(f"Olfaction: {self.odor_smooth}")
-            print(f"Left signal: {left_signal}, Right signal: {right_signal}")
-            print(f"ratio: {ratio}")
+            # print(f"Olfaction: {self.odor_smooth}")
+            # print(f"Left signal: {left_signal}, Right signal: {right_signal}")
+            print(f"Olfaction ratio: {ratio}")
 
         if abs(ratio - 1) < GO_STRAIGHT_THRESHOLD:
             if self.show_prints:
