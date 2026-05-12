@@ -31,7 +31,7 @@ BINOCULAR_HEIGHT_TIE_PX = 6
 MAX_GRASS_WIDTH = 55           # I.e this would be the ground
 NO_OBSTACLE_FOUND = -1
 STEP_DODGE_DRAGON = 1000 # step to start dodging dragonfly, can be tuned based on when the dragonfly appears in the vision
-
+DRAGON_FLY_DETECTION_THRESHOLD = 100 # threshold to detect when dragonfly head turn fully red, can be tuned based on the vision observation of the dragonfly head
 
 class State(Enum):
     FOLLOW_SCENT = auto()
@@ -113,11 +113,11 @@ class Controller:
                 print(f"Dragonfly head scores: Left={left_eye_score}, Right={right_eye_score}, Detected={head_detected}")
         
             if left_eye_score > right_eye_score : 
-                if left_eye_score > 200: # threshold to detect when dragonfly head turn fully red 
+                if left_eye_score > DRAGON_FLY_DETECTION_THRESHOLD: # threshold to detect when dragonfly head turn fully red 
                     #print(f"Dragonfly head detected on the left eye! Starting dodge maneuver.")
                     self.state = State.DODGE_DRAGON
             else:
-                if right_eye_score > 200: # threshold to detect when dragonfly head turn fully red 
+                if right_eye_score > DRAGON_FLY_DETECTION_THRESHOLD: # threshold to detect when dragonfly head turn fully red 
                     #print(f"Dragonfly head detected on the right eye! Starting dodge maneuver.")
                     self.state = State.DODGE_DRAGON
             
@@ -127,7 +127,7 @@ class Controller:
                 self._step_dodging_dragon += 5
                 #print(f"Dodging dragonfly... Step {self._step_dodging_dragon}/{STEP_DODGE_DRAGON}")
 
-                self.drive = np.array([-0.5,-0.5])  
+                self.drive = np.array([-1,-1])  
                 joint_angles, adhesion = self.turning_controller.step(self.drive)
                 return joint_angles, adhesion
             if self._step_dodging_dragon > STEP_DODGE_DRAGON and self.state == State.DODGE_DRAGON:
