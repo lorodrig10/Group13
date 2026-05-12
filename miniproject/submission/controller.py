@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
 SHOW_PRINTS = True
-PRINT_FREQ = 1000
+PRINT_FREQ = 5000
 SENSOR_FREQ = 5 
 GO_STRAIGHT_THRESHOLD = 2.5 / 100
 SKY_REGION_RATIO = 0.42 #allow to modify the % of height seen from the sky (the smaller the more high we see)
@@ -30,6 +30,7 @@ BINOCULAR_HEIGHT_TIE_PX = 6
 
 MAX_GRASS_WIDTH = 55           # I.e this would be the ground
 NO_OBSTACLE_FOUND = -1
+STEP_DODGE_DRAGON = 1000 # step to start dodging dragonfly, can be tuned based on when the dragonfly appears in the vision
 
 
 class State(Enum):
@@ -58,6 +59,7 @@ class Controller:
         self._last_roi_h = 1
         self._seen_soft_active = False
         self._seen_soft_vec = np.array([2.0, 2.0])
+        self._step_dodging_dragon = 0
 
     def step(self, sim: MiniprojectSimulation, step):
         self.show_prints = SHOW_PRINTS and step % PRINT_FREQ == 0
@@ -82,6 +84,7 @@ class Controller:
                 left_w,
                 right_w,
             ) = self.detect_obstacle(sim, visualize=self.show_prints)
+            
 
             if self.show_prints:
                 print(f"Vision obstacle scores: L={left_h:.4f}, R={right_h:.4f}")
@@ -105,26 +108,54 @@ class Controller:
             if obstacle_threat:
                 self.avoid_drive = self.avoid_obstacle(left_h, right_h, left_w, right_w)
                 self.avoid_hold = AVOID_HOLD_STEPS
+            left_eye_score, right_eye_score, head_detected = self.detect_dragonflyhead(sim, step)
+            if self.show_prints and step % PRINT_FREQ == 0:
+                print(f"Dragonfly head scores: Left={left_eye_score}, Right={right_eye_score}, Detected={head_detected}")
+        
+            if left_eye_score > right_eye_score : 
+                if left_eye_score > 200: # threshold to detect when dragonfly head turn fully red 
+                    #print(f"Dragonfly head detected on the left eye! Starting dodge maneuver.")
+                    self.state = State.DODGE_DRAGON
+            else:
+                if right_eye_score > 200: # threshold to detect when dragonfly head turn fully red 
+                    #print(f"Dragonfly head detected on the right eye! Starting dodge maneuver.")
+                    self.state = State.DODGE_DRAGON
+            
+            if self._step_dodging_dragon <= STEP_DODGE_DRAGON :
+                if self.show_prints and self._step_dodging_dragon == 0:
+                    print(f"Dragonfly head detected! Starting dodge maneuver.")
+                self._step_dodging_dragon += 5
+                #print(f"Dodging dragonfly... Step {self._step_dodging_dragon}/{STEP_DODGE_DRAGON}")
 
-        self.follow_pure = self.follow_scent()
-        s_soft = OBSTACLE_SEEN_SOFT_BLEND if self._seen_soft_active else 0.0
-        self.follow_drive = (1.0 - s_soft) * self.follow_pure + s_soft * self._seen_soft_vec
+                self.drive = np.array([-0.5,-0.5])  
+                joint_angles, adhesion = self.turning_controller.step(self.drive)
+                return joint_angles, adhesion
+            if self._step_dodging_dragon > STEP_DODGE_DRAGON and self.state == State.DODGE_DRAGON:
+                if self.show_prints:
+                    print(f"Finished dodge maneuver. Resuming normal behavior.")
+                self.state = State.FOLLOW_SCENT
+                self._step_dodging_dragon = 0
+        if self.state != State.DODGE_DRAGON:
+            self.follow_pure = self.follow_scent()
+            s_soft = OBSTACLE_SEEN_SOFT_BLEND if self._seen_soft_active else 0.0
+            self.follow_drive = (1.0 - s_soft) * self.follow_pure + s_soft * self._seen_soft_vec
 
-        if self.avoid_hold > 0:
-            self.avoid_hold -= 1
+            if self.avoid_hold > 0:
+                self.avoid_hold -= 1
 
-        if self.avoid_hold > 0:
-            self.state = State.AVOID_OBSTACLE
-            rh = max(float(self._last_roi_h), 1.0)
-            closeness = float(np.clip(1.0 - (self._last_y_top / rh), 0.0, 1.0))
-            b = AVOID_ODOR_BLEND_AT_BOUNDARY + (
-                AVOID_ODOR_BLEND_WHEN_CLOSE - AVOID_ODOR_BLEND_AT_BOUNDARY
-            ) * closeness
-            # Use follow_pure so odor toward banana is not diluted by soft avoidance twice.
-            self.drive = b * self.avoid_drive + (1.0 - b) * self.follow_pure
-        else:
-            self.state = State.FOLLOW_SCENT
-            self.drive = self.follow_drive
+            if self.avoid_hold > 0:
+                self.state = State.AVOID_OBSTACLE
+                rh = max(float(self._last_roi_h), 1.0)
+                closeness = float(np.clip(1.0 - (self._last_y_top / rh), 0.0, 1.0))
+                b = AVOID_ODOR_BLEND_AT_BOUNDARY + (
+                    AVOID_ODOR_BLEND_WHEN_CLOSE - AVOID_ODOR_BLEND_AT_BOUNDARY
+                ) * closeness
+                # Use follow_pure so odor toward banana is not diluted by soft avoidance twice.
+                self.drive = b * self.avoid_drive + (1.0 - b) * self.follow_pure
+            else:
+                self.state = State.FOLLOW_SCENT
+                self.drive = self.follow_drive
+        
 
         if step > 0 and self.show_prints:
             fly_vision = np.concatenate(sim.get_raw_vision(sim.fly.name), axis=-2)
@@ -246,6 +277,68 @@ class Controller:
             left_w,
             right_w,
         )
+    def detect_dragonflyhead(self,sim,steps):
+        right_eye = False
+        left_eye = False
+        left_eye_score = 0
+        right_eye_score = 0
+        eye_imgs = sim.get_raw_vision(sim.fly.name)
+        head_detected = False
+        count = 0
+        for img in eye_imgs:
+            img = np.asarray(img)
+
+            if img.max() <= 1.0:
+                img = img * 255.0
+
+            h, w, c = img.shape
+
+            target_region = img
+
+            r = target_region[:, :, 0].astype(float)
+            g = target_region[:, :, 1].astype(float)
+            b = target_region[:, :, 2].astype(float)
+
+            # Simple color-based detection for the dragonfly's head 
+            head_mask = (
+                (r > 90) & (g < 30) & (b < 30)  # looking for a reddish color
+            )
+            if count == 1:
+                right_eye = True
+                right_eye_score = np.sum(head_mask)
+                left_eye = False
+            else:
+                right_eye = False
+                left_eye_score = np.sum(head_mask)
+                left_eye = True
+
+            if self.show_prints:
+                if steps % PRINT_FREQ == 0:
+                    print(np.shape(head_mask))
+                    print(f"right_eye_score: {right_eye_score}, left_eye_score: {left_eye_score}")
+                    eye_label = "Left" if left_eye else "Right"
+                    print(f"Dragonfly head detected: {np.any(head_mask)} ({eye_label} eye)")
+
+                    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+                    axes[0].imshow(target_region.astype(np.uint8))
+                    axes[0].set_title(f"Dragonfly Vision ({eye_label} Eye)")
+                    axes[0].axis('off')
+
+                    axes[1].imshow(head_mask, cmap='gray')
+                    axes[1].set_title("Dragonfly Head Mask (Reddish Detection)")
+                    axes[1].axis('off')
+
+                    plt.tight_layout()
+                    plt.show()
+                count += 1
+
+            if np.any(head_mask):
+                head_detected = True
+                break
+
+        return left_eye_score, right_eye_score, head_detected
+
+    
 
     def visualize_detection(self, debug_info, heights):
         """
