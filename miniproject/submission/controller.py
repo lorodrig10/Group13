@@ -207,9 +207,6 @@ class Controller:
                     obstacle_width = max_continuous_width
                     break
 
-            if self.show_prints:
-                print(f"Eye {i}: obstacle_y={obstacle_y}, obstacle_width={obstacle_width}")
-                print("ends - starts", ends - starts)
 
             heights.append(obstacle_y)
             widths.append(obstacle_width)
@@ -231,6 +228,10 @@ class Controller:
             y_top = min(h for h in heights if h != -1)
             limit = max(int(roi_h * OBSTACLE_THREAT_FRAC_OF_ROI), 1)
             obstacle_threat = y_top <= limit
+            
+            if self.show_prints:
+                print(f"Eye {i}: obstacle_y={obstacle_y}, obstacle_width={obstacle_width}")
+                print("ends - starts", ends - starts)
 
         if visualize and obstacle_seen:
             self.visualize_detection(debug_info, heights)
@@ -332,11 +333,17 @@ class Controller:
         ys = [h for h in (left_h, right_h) if h != MISSING]
         y_near = min(ys) if ys else OBSTACLE_ROW_CLOSE
         if y_near < OBSTACLE_ROW_CLOSE:
-            fast, slow = 2.25, 0.12
+            fast, slow = 2.25, -0.3
+            if self.show_prints:
+                print("Obstacle très proche → évitement rapide")
         elif y_near < OBSTACLE_ROW_CLOSE + 25:
             fast, slow = 1.75, 0.18
+            if self.show_prints:
+                print("Obstacle proche → évitement modéré")
         else:
             fast, slow = 1.45, 0.28
+            if self.show_prints:
+                print("Obstacle à distance → évitement doux")
 
         if turn_right:
             return np.array([fast, slow])
