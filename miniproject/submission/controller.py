@@ -8,8 +8,8 @@ SHOW_PRINTS = True
 PRINT_FREQ = 1000
 SENSOR_FREQ = 5 
 GO_STRAIGHT_THRESHOLD = 2.5 / 100
-SKY_REGION_RATIO = 0.4 #allow to modify the % of height seen from the sky (the smaller the more high we see)
-BINOCULAR_OVERLAP_RATIO = 0.01 #to avoid looking at the same region with both eyes, -> might be ineffective
+SKY_REGION_RATIO = 0.42 #allow to modify the % of height seen from the sky (the smaller the more high we see)
+BINOCULAR_OVERLAP_RATIO = 0.12 #to avoid looking at the same region with both eyes, -> might be ineffective
 EXTERNAL_VISON_RATIO = 0.3  # to avoid looking at fare left and far right, which are less relevant for obstacle detection
 SWEEP_HEIGHT = 5               # Hauteur (en pixels) de chaque bande analysée
 MIN_GRASS_WIDTH = 40            # Largeur minimum (en pixels); slightly lower helps thin blades register earlier
@@ -28,7 +28,7 @@ AVOID_ODOR_BLEND_WHEN_CLOSE = 0.88
 # Head-on: both eyes see similar row — break tie with wider green band per eye.
 BINOCULAR_HEIGHT_TIE_PX = 6
 
-MAX_GRASS_WIDTH = 50           # I.e this would be the ground
+MAX_GRASS_WIDTH = 55           # I.e this would be the ground
 NO_OBSTACLE_FOUND = -1
 
 
@@ -165,9 +165,9 @@ class Controller:
             # Détermination des limites (Cadre d'observation)
             if i == 0:  #left eye
                 start_w = int(w * EXTERNAL_VISON_RATIO)
-                end_w = int(w * (1 - BINOCULAR_OVERLAP_RATIO))
+                end_w = int(w * (1 - BINOCULAR_OVERLAP_RATIO)) # we blind the fly's left eye in the center, to avoid it looking at the same region as the right eye
             else:       #right eye
-                start_w = int(w * BINOCULAR_OVERLAP_RATIO)
+                start_w = 0
                 end_w = int(w * (1 - EXTERNAL_VISON_RATIO))
 
             target_region = img[:target_h, start_w:end_w, :]
