@@ -448,3 +448,6 @@ fabric.properties
 
 *.mp4
 outputs/
+image_obstacle_detection.png
+miniproject/submission/controller_tuning.md
+miniproject/submission/test.ipynb

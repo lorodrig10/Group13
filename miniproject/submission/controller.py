@@ -5,16 +5,18 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
 SHOW_PRINTS = True
-PRINT_FREQ = 5000
-SENSOR_FREQ = 5 
+PRINT_FREQ = 10000
+#for optimum run put back to 5 
+SENSOR_FREQ = 10 
 GO_STRAIGHT_THRESHOLD = 2.5 / 100
 SKY_REGION_RATIO = 0.42 #allow to modify the % of height seen from the sky (the smaller the more high we see)
 BINOCULAR_OVERLAP_RATIO = 0.12 #to avoid looking at the same region with both eyes, -> might be ineffective
 EXTERNAL_VISON_RATIO = 0.25  # to avoid looking at fare left and far right, which are less relevant for obstacle detection
 SWEEP_HEIGHT = 5               # Hauteur (en pixels) de chaque bande analysée
-MIN_GRASS_WIDTH = 40            # Largeur minimum (en pixels); slightly lower helps thin blades register earlier
+MIN_GRASS_WIDTH = 30            # Largeur minimum (en pixels); slightly lower helps thin blades register earlier
 AVOID_HOLD_STEPS = 48           # Continue evasive drive briefly after close grass leaves FOV
-OBSTACLE_ROW_CLOSE = 22         # Row from top of ROI — smaller means obstacle appears larger / closer
+#of goes to shit put back at 22 instead of 100
+OBSTACLE_ROW_CLOSE = 100         # Row from top of ROI — smaller means obstacle appears larger / closer
 # Grass top row y_top <= limit => threat. Higher fraction => react earlier (larger limit).
 OBSTACLE_THREAT_FRAC_OF_ROI = 0.76
 # When olfaction says “go straight” (common near the banana), widen threat so grass lower in the sky ROI still triggers full avoidance.
@@ -32,7 +34,7 @@ MAX_GRASS_WIDTH = 55           # I.e this would be the ground
 NO_OBSTACLE_FOUND = -1
 STEP_DODGE_DRAGON = 1000 # step to start dodging dragonfly, can be tuned based on when the dragonfly appears in the vision
 DRAGON_FLY_DETECTION_THRESHOLD = 100 # threshold to detect when dragonfly head turn fully red, can be tuned based on the vision observation of the dragonfly head
-
+SHOW_DRAGONFLY_DETECTION = False # set to True to visualize the dragonfly head detection process, which can help to tune the STEP_DODGE_DRAGON and DRAGON_FLY_DETECTION_THRESHOLD parameters
 class State(Enum):
     FOLLOW_SCENT = auto()
     AVOID_OBSTACLE = auto()
@@ -60,9 +62,14 @@ class Controller:
         self._seen_soft_active = False
         self._seen_soft_vec = np.array([2.0, 2.0])
         self._step_dodging_dragon = 0
+        self.current_step = 0
+        self.print_freq = PRINT_FREQ
 
     def step(self, sim: MiniprojectSimulation, step):
-        self.show_prints = SHOW_PRINTS and step % PRINT_FREQ == 0
+        if step >45000: 
+            self.print_freq = 500
+        self.current_step = step
+        self.show_prints = SHOW_PRINTS and step % self.print_freq == 0
 
         raw_olfaction = sim.get_olfaction(sim.fly.name)
         if self.odor_smooth is None:
@@ -109,7 +116,7 @@ class Controller:
                 self.avoid_drive = self.avoid_obstacle(left_h, right_h, left_w, right_w)
                 self.avoid_hold = AVOID_HOLD_STEPS
             left_eye_score, right_eye_score, head_detected = self.detect_dragonflyhead(sim, step)
-            if self.show_prints and step % PRINT_FREQ == 0:
+            if self.show_prints and step % self.print_freq == 0:
                 print(f"Dragonfly head scores: Left={left_eye_score}, Right={right_eye_score}, Detected={head_detected}")
         
             if left_eye_score > right_eye_score : 
@@ -145,13 +152,18 @@ class Controller:
 
             if self.avoid_hold > 0:
                 self.state = State.AVOID_OBSTACLE
-                rh = max(float(self._last_roi_h), 1.0)
-                closeness = float(np.clip(1.0 - (self._last_y_top / rh), 0.0, 1.0))
-                b = AVOID_ODOR_BLEND_AT_BOUNDARY + (
-                    AVOID_ODOR_BLEND_WHEN_CLOSE - AVOID_ODOR_BLEND_AT_BOUNDARY
-                ) * closeness
+                #rh = max(float(self._last_roi_h), 1.0)
+                #closeness = float(np.clip(1.0 - (self._last_y_top / rh), 0.0, 1.0))
+                #b = AVOID_ODOR_BLEND_AT_BOUNDARY + (
+                #    AVOID_ODOR_BLEND_WHEN_CLOSE - AVOID_ODOR_BLEND_AT_BOUNDARY
+                #) * closeness
+                #b = max(b, 0.8)# ensure we still have a strong avoidance component even when the obstacle is at the edge of the threat zone
+                b = self.closeness
                 # Use follow_pure so odor toward banana is not diluted by soft avoidance twice.
                 self.drive = b * self.avoid_drive + (1.0 - b) * self.follow_pure
+                if self.show_prints and step % self.print_freq == 0:
+
+                    print(f"Avoid_drive: {self.avoid_drive}, follow_pure: {self.follow_pure}, blend: {b:.2f}, resulting drive: {self.drive}")
             else:
                 self.state = State.FOLLOW_SCENT
                 self.drive = self.follow_drive
@@ -312,8 +324,8 @@ class Controller:
                 left_eye_score = np.sum(head_mask)
                 left_eye = True
 
-            if self.show_prints:
-                if steps % PRINT_FREQ == 0:
+            if self.show_prints and SHOW_DRAGONFLY_DETECTION:
+                if steps % self.print_freq == 0:
                     print(np.shape(head_mask))
                     print(f"right_eye_score: {right_eye_score}, left_eye_score: {left_eye_score}")
                     eye_label = "Left" if left_eye else "Right"
@@ -356,7 +368,7 @@ class Controller:
 
             ax_img = axes[0, i]
             ax_img.imshow(img)
-            ax_img.set_title(f"{titles[i]} - Image Originale")
+            ax_img.set_title(f"step : {self.current_step} - {titles[i]} - Image Originale")
             
             rect = patches.Rectangle((box_x, box_y), box_w, box_h, 
                                      linewidth=2, edgecolor='red', facecolor='none', linestyle='--')
@@ -364,7 +376,7 @@ class Controller:
             
             ax_mask = axes[1, i]
             ax_mask.imshow(mask, cmap='gray', vmin=0, vmax=1)
-            ax_mask.set_title(f"{titles[i]} - Masque Vert (Rogné)")
+            ax_mask.set_title(f"step : {self.current_step} - {titles[i]} - Masque Vert (Rogné)")
             
             if detected_y != NO_OBSTACLE_FOUND:
                 rect_band = patches.Rectangle((0, detected_y), box_w, SWEEP_HEIGHT, 
@@ -426,17 +438,20 @@ class Controller:
         ys = [h for h in (left_h, right_h) if h != MISSING]
         y_near = min(ys) if ys else OBSTACLE_ROW_CLOSE
         if y_near < OBSTACLE_ROW_CLOSE:
-            fast, slow = 2.25, -0.3
+            fast, slow = 1.35, 0.06
+            self.closeness = 1.0
             if self.show_prints:
-                print("Obstacle très proche → évitement rapide")
-        elif y_near < OBSTACLE_ROW_CLOSE + 25:
-            fast, slow = 1.75, 0.18
+                print("Obstacle très proche → évitement serré mais toujours en avant")
+        elif y_near < OBSTACLE_ROW_CLOSE * 2:
+            fast, slow = 1.10, 0.08
+            self.closeness = 0.8
             if self.show_prints:
-                print("Obstacle proche → évitement modéré")
+                print("Obstacle proche → évitement modéré avec moins d'avance")
         else:
-            fast, slow = 1.45, 0.28
+            fast, slow = 0.95, 0.10
+            self.closeness = 0.2
             if self.show_prints:
-                print("Obstacle à distance → évitement doux")
+                print("Obstacle à distance → évitement doux et lent")
 
         if turn_right:
             return np.array([fast, slow])
