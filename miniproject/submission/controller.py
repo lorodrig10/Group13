@@ -31,7 +31,21 @@ BINOCULAR_HEIGHT_TIE_PX = 6
 MAX_GRASS_WIDTH = 55           # I.e this would be the ground
 NO_OBSTACLE_FOUND = -1
 STEP_DODGE_DRAGON = 1000 # step to start dodging dragonfly, can be tuned based on when the dragonfly appears in the vision
-DRAGON_FLY_DETECTION_THRESHOLD = 100 # threshold to detect when dragonfly head turn fully red, can be tuned based on the vision observation of the dragonfly head
+DRAGON_FLY_DETECTION_THRESHOLD = 70 # threshold to detect when dragonfly head turn fully red, can be tuned based on the vision observation of the dragonfly head
+
+DRAGON_DODGE_STEPS = 50
+DRAGON_DRIVE_MIN = -1.3
+DRAGON_DRIVE_MAX = 1.3
+
+DRAGON_BASE_BACKWARD = -0.4
+DRAGON_RED_GAIN = 0.0025
+DRAGON_TURN_GAIN = 0.48
+
+DRAGON_CENTER_DEADBAND = 0.08
+DRAGON_DEFAULT_ESCAPE_LEFT = True
+
+DRAGON_SMOOTHING = 0.9
+DRAGON_RED_CAP = 130
 
 class State(Enum):
     FOLLOW_SCENT = auto()
@@ -60,6 +74,8 @@ class Controller:
         self._seen_soft_active = False
         self._seen_soft_vec = np.array([2.0, 2.0])
         self._step_dodging_dragon = 0
+        self.dragon_drive = np.array([0.0, 0.0])
+        self.dragon_escape_right = True
 
     def step(self, sim: MiniprojectSimulation, step):
         self.show_prints = SHOW_PRINTS and step % PRINT_FREQ == 0
@@ -108,33 +124,52 @@ class Controller:
             if obstacle_threat:
                 self.avoid_drive = self.avoid_obstacle(left_h, right_h, left_w, right_w)
                 self.avoid_hold = AVOID_HOLD_STEPS
-            left_eye_score, right_eye_score, head_detected = self.detect_dragonflyhead(sim, step)
-            if self.show_prints and step % PRINT_FREQ == 0:
-                print(f"Dragonfly head scores: Left={left_eye_score}, Right={right_eye_score}, Detected={head_detected}")
-        
-            if left_eye_score > right_eye_score : 
-                if left_eye_score > DRAGON_FLY_DETECTION_THRESHOLD: # threshold to detect when dragonfly head turn fully red 
-                    #print(f"Dragonfly head detected on the left eye! Starting dodge maneuver.")
-                    self.state = State.DODGE_DRAGON
-            else:
-                if right_eye_score > DRAGON_FLY_DETECTION_THRESHOLD: # threshold to detect when dragonfly head turn fully red 
-                    #print(f"Dragonfly head detected on the right eye! Starting dodge maneuver.")
-                    self.state = State.DODGE_DRAGON
-            
-            if self._step_dodging_dragon <= STEP_DODGE_DRAGON :
-                if self.show_prints and self._step_dodging_dragon == 0:
-                    print(f"Dragonfly head detected! Starting dodge maneuver.")
-                self._step_dodging_dragon += 5
-                #print(f"Dodging dragonfly... Step {self._step_dodging_dragon}/{STEP_DODGE_DRAGON}")
 
-                self.drive = np.array([-1,-1])  
-                joint_angles, adhesion = self.turning_controller.step(self.drive)
-                return joint_angles, adhesion
-            if self._step_dodging_dragon > STEP_DODGE_DRAGON and self.state == State.DODGE_DRAGON:
-                if self.show_prints:
-                    print(f"Finished dodge maneuver. Resuming normal behavior.")
-                self.state = State.FOLLOW_SCENT
-                self._step_dodging_dragon = 0
+            total_red, red_center, head_detected = self.detect_dragonflyhead(sim, step)
+            if self.show_prints:
+                print(
+                    f"Dragonfly red: total={total_red}, "
+                    f"center={red_center:.2f}, "
+                    f"detected={head_detected}"
+                )
+
+            if head_detected:
+                self.state = State.DODGE_DRAGON
+                self._step_dodging_dragon = DRAGON_DODGE_STEPS
+
+                if self.state != State.DODGE_DRAGON:
+                    offset = red_center - 1.0
+
+                    if abs(offset) < DRAGON_CENTER_DEADBAND:
+                        self.dragon_escape_right = not DRAGON_DEFAULT_ESCAPE_LEFT
+                    else:
+                        self.dragon_escape_right = offset > 0
+
+                target_drive = self.compute_dragon_dodge_drive(total_red)
+
+                # Changement progressif de vitesse
+                self.dragon_drive = (
+                    DRAGON_SMOOTHING * self.dragon_drive
+                    + (1.0 - DRAGON_SMOOTHING) * target_drive
+                )
+
+                self.dragon_drive = np.clip(
+                    self.dragon_drive,
+                    DRAGON_DRIVE_MIN,
+                    DRAGON_DRIVE_MAX,
+                )
+
+            if self.state == State.DODGE_DRAGON:
+                if self._step_dodging_dragon > 0:
+                    self._step_dodging_dragon -= 1
+                    self.drive = self.dragon_drive
+
+                    joint_angles, adhesion = self.turning_controller.step(self.drive)
+                    return joint_angles, adhesion
+                else:
+                    self.state = State.FOLLOW_SCENT
+                    self.dragon_drive = np.array([0.0, 0.0])
+                    
         if self.state != State.DODGE_DRAGON:
             self.follow_pure = self.follow_scent()
             s_soft = OBSTACLE_SEEN_SOFT_BLEND if self._seen_soft_active else 0.0
@@ -277,15 +312,14 @@ class Controller:
             left_w,
             right_w,
         )
-    def detect_dragonflyhead(self,sim,steps):
-        right_eye = False
-        left_eye = False
-        left_eye_score = 0
-        right_eye_score = 0
+    
+    def detect_dragonflyhead(self, sim, steps):
         eye_imgs = sim.get_raw_vision(sim.fly.name)
-        head_detected = False
-        count = 0
-        for img in eye_imgs:
+
+        total_red = 0
+        weighted_x_sum = 0.0
+
+        for eye_idx, img in enumerate(eye_imgs):
             img = np.asarray(img)
 
             if img.max() <= 1.0:
@@ -293,52 +327,58 @@ class Controller:
 
             h, w, c = img.shape
 
-            target_region = img
+            r = img[:, :, 0].astype(float)
+            g = img[:, :, 1].astype(float)
+            b = img[:, :, 2].astype(float)
 
-            r = target_region[:, :, 0].astype(float)
-            g = target_region[:, :, 1].astype(float)
-            b = target_region[:, :, 2].astype(float)
-
-            # Simple color-based detection for the dragonfly's head 
-            head_mask = (
-                (r > 90) & (g < 30) & (b < 30)  # looking for a reddish color
+            red_mask = (
+                (r > 90)
+                & (r > g * 1.8)
+                & (r > b * 1.8)
+                & (g < 80)
+                & (b < 80)
             )
-            if count == 1:
-                right_eye = True
-                right_eye_score = np.sum(head_mask)
-                left_eye = False
-            else:
-                right_eye = False
-                left_eye_score = np.sum(head_mask)
-                left_eye = True
 
-            if self.show_prints:
-                if steps % PRINT_FREQ == 0:
-                    print(np.shape(head_mask))
-                    print(f"right_eye_score: {right_eye_score}, left_eye_score: {left_eye_score}")
-                    eye_label = "Left" if left_eye else "Right"
-                    print(f"Dragonfly head detected: {np.any(head_mask)} ({eye_label} eye)")
+            red_count = np.sum(red_mask)
+            total_red += red_count
 
-                    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-                    axes[0].imshow(target_region.astype(np.uint8))
-                    axes[0].set_title(f"Dragonfly Vision ({eye_label} Eye)")
-                    axes[0].axis('off')
+            if red_count > 0:
+                _, xs = np.where(red_mask)
 
-                    axes[1].imshow(head_mask, cmap='gray')
-                    axes[1].set_title("Dragonfly Head Mask (Reddish Detection)")
-                    axes[1].axis('off')
+                # Repère commun :
+                # œil gauche : x entre 0 et 1
+                # œil droit  : x entre 1 et 2
+                x_global = xs / max(w - 1, 1) + eye_idx
+                weighted_x_sum += np.sum(x_global)
 
-                    plt.tight_layout()
-                    plt.show()
-                count += 1
+        if total_red > 0:
+            red_center = weighted_x_sum / total_red
+        else:
+            red_center = 1.0
 
-            if np.any(head_mask):
-                head_detected = True
-                break
+        head_detected = total_red > DRAGON_FLY_DETECTION_THRESHOLD
 
-        return left_eye_score, right_eye_score, head_detected
+        return total_red, red_center, head_detected
 
-    
+    def compute_dragon_dodge_drive(self, total_red):
+        effective_red = min(total_red, DRAGON_RED_CAP)
+        intensity = DRAGON_BASE_BACKWARD - DRAGON_RED_GAIN * effective_red
+        intensity = np.clip(intensity, DRAGON_DRIVE_MIN, 0.0)
+
+        turn = DRAGON_TURN_GAIN
+
+        if self.dragon_escape_right:
+            drive = np.array([
+                intensity + turn,
+                intensity - turn,
+            ])
+        else:
+            drive = np.array([
+                intensity - turn,
+                intensity + turn,
+            ])
+
+        return np.clip(drive, DRAGON_DRIVE_MIN, DRAGON_DRIVE_MAX)  
 
     def visualize_detection(self, debug_info, heights):
         """
