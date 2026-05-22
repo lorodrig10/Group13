@@ -6,35 +6,26 @@ import matplotlib.patches as patches
 
 SHOW_PRINTS = True
 PRINT_FREQ = 10000
-#for optimum run put back to 5 
-SENSOR_FREQ = 10 
-GO_STRAIGHT_THRESHOLD = 2.5 / 100
-SKY_REGION_RATIO = 0.42 #allow to modify the % of height seen from the sky (the smaller the more high we see)
-BINOCULAR_OVERLAP_RATIO = 0.12 #to avoid looking at the same region with both eyes, -> might be ineffective
-EXTERNAL_VISON_RATIO = 0.25  # to avoid looking at fare left and far right, which are less relevant for obstacle detection
-SWEEP_HEIGHT = 5               # Hauteur (en pixels) de chaque bande analysée
-MIN_GRASS_WIDTH = 30            # Largeur minimum (en pixels); slightly lower helps thin blades register earlier
-AVOID_HOLD_STEPS = 48           # Continue evasive drive briefly after close grass leaves FOV
-#of goes to shit put back at 22 instead of 100
-OBSTACLE_ROW_CLOSE = 100         # Row from top of ROI — smaller means obstacle appears larger / closer
-# Grass top row y_top <= limit => threat. Higher fraction => react earlier (larger limit).
-OBSTACLE_THREAT_FRAC_OF_ROI = 0.76
-# When olfaction says “go straight” (common near the banana), widen threat so grass lower in the sky ROI still triggers full avoidance.
-OBSTACLE_THREAT_STRAIGHT_FRAC = 0.93
-# Grass visible but below threat line: small lateral nudge only (large values erase odor).
-OBSTACLE_SEEN_SOFT_BLEND = 0.14
-# During threat, blend with *pure* follow_scent — not with soft bias (that double-counts avoidance).
-# Lower b => more odor in the mix. Still ramp up avoidance when grass is very close (high in ROI).
-AVOID_ODOR_BLEND_AT_BOUNDARY = 0.36
+SENSOR_FREQ = 10                     #Skip vision processing on most steps to save time; only check for obstacles every SENSOR_FREQ steps.
+GO_STRAIGHT_THRESHOLD = 2.5 / 100    # Olfaction ratio (left/right) within this range counts as "go straight" for obstacle threat assessment.
+SKY_REGION_RATIO = 0.42              #allow to modify the % of height seen from the sky (the smaller the more high we see)
+BINOCULAR_OVERLAP_RATIO = 0.12       #to avoid looking at the same region with both eyes, -> might be ineffective
+EXTERNAL_VISON_RATIO = 0.25          # to avoid looking at fare left and far right, which are less relevant for obstacle detection
+SWEEP_HEIGHT = 5                     # Hauteur (en pixels) de chaque bande analysée
+MIN_GRASS_WIDTH = 30                 # Largeur minimum (en pixels); slightly lower helps thin blades register earlier
+AVOID_HOLD_STEPS = 48                # Continue evasive drive briefly after close grass leaves FOV
+OBSTACLE_ROW_CLOSE = 100             # Row from top of ROI — smaller means obstacle appears larger / closer
+OBSTACLE_THREAT_FRAC_OF_ROI = 0.76   # Grass top row y_top <= limit => threat. Higher fraction => react earlier (larger limit).
+OBSTACLE_THREAT_STRAIGHT_FRAC = 0.93 # When olfaction says “go straight” (common near the banana), widen threat so grass lower in the sky ROI still triggers full avoidance.
+OBSTACLE_SEEN_SOFT_BLEND = 0.14      # Grass visible but below threat line: small lateral nudge only (large values erase odor).
+AVOID_ODOR_BLEND_AT_BOUNDARY = 0.36  # During threat, blend with *pure* follow_scent — not with soft bias (that double-counts avoidance).
 AVOID_ODOR_BLEND_WHEN_CLOSE = 0.88
-# Head-on: both eyes see similar row — break tie with wider green band per eye.
-BINOCULAR_HEIGHT_TIE_PX = 6
-
-MAX_GRASS_WIDTH = 55           # I.e this would be the ground
+BINOCULAR_HEIGHT_TIE_PX = 6          # Head-on: both eyes see similar row — break tie with wider green band per eye.
+MAX_GRASS_WIDTH = 55                 # I.e this would be the ground
 NO_OBSTACLE_FOUND = -1
-STEP_DODGE_DRAGON = 1000 # step to start dodging dragonfly, can be tuned based on when the dragonfly appears in the vision
+STEP_DODGE_DRAGON = 1000             # step to start dodging dragonfly, can be tuned based on when the dragonfly appears in the vision
 DRAGON_FLY_DETECTION_THRESHOLD = 100 # threshold to detect when dragonfly head turn fully red, can be tuned based on the vision observation of the dragonfly head
-SHOW_DRAGONFLY_DETECTION = False # set to True to visualize the dragonfly head detection process, which can help to tune the STEP_DODGE_DRAGON and DRAGON_FLY_DETECTION_THRESHOLD parameters
+SHOW_DRAGONFLY_DETECTION = False     # set to True to visualize the dragonfly head detection process, which can help to tune the STEP_DODGE_DRAGON and DRAGON_FLY_DETECTION_THRESHOLD parameters
 class State(Enum):
     FOLLOW_SCENT = auto()
     AVOID_OBSTACLE = auto()
@@ -152,12 +143,6 @@ class Controller:
 
             if self.avoid_hold > 0:
                 self.state = State.AVOID_OBSTACLE
-                #rh = max(float(self._last_roi_h), 1.0)
-                #closeness = float(np.clip(1.0 - (self._last_y_top / rh), 0.0, 1.0))
-                #b = AVOID_ODOR_BLEND_AT_BOUNDARY + (
-                #    AVOID_ODOR_BLEND_WHEN_CLOSE - AVOID_ODOR_BLEND_AT_BOUNDARY
-                #) * closeness
-                #b = max(b, 0.8)# ensure we still have a strong avoidance component even when the obstacle is at the edge of the threat zone
                 b = self.closeness
                 # Use follow_pure so odor toward banana is not diluted by soft avoidance twice.
                 self.drive = b * self.avoid_drive + (1.0 - b) * self.follow_pure
@@ -189,11 +174,9 @@ class Controller:
         """
         eye_imgs = sim.get_raw_vision(sim.fly.name)
         
-        # Pour stocker les résultats finaux
         heights = []
         widths = []
         
-        # Dictionnaire pour stocker les données nécessaires à la visualisation
         debug_info = {'imgs': [], 'masks': [], 'boxes': []}
 
         for i, img in enumerate(eye_imgs):
@@ -205,7 +188,6 @@ class Controller:
             h, w, c = img.shape
             target_h = int(h * SKY_REGION_RATIO)
 
-            # Détermination des limites (Cadre d'observation)
             if i == 0:  #left eye
                 start_w = int(w * EXTERNAL_VISON_RATIO)
                 end_w = int(w * (1 - BINOCULAR_OVERLAP_RATIO)) # we blind the fly's left eye in the center, to avoid it looking at the same region as the right eye
