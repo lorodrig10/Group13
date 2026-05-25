@@ -4,10 +4,10 @@ from enum import Enum, auto
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
-SHOW_PRINTS = True
+SHOW_PRINTS = False
 PRINT_FREQ = 10000
 #for optimum run put back to 5 
-SENSOR_FREQ = 10 
+SENSOR_FREQ = 10
 GO_STRAIGHT_THRESHOLD = 2.5 / 100
 SKY_REGION_RATIO = 0.42 #allow to modify the % of height seen from the sky (the smaller the more high we see)
 BINOCULAR_OVERLAP_RATIO = 0.12 #to avoid looking at the same region with both eyes, -> might be ineffective
@@ -32,9 +32,10 @@ BINOCULAR_HEIGHT_TIE_PX = 6
 
 MAX_GRASS_WIDTH = 55           # I.e this would be the ground
 NO_OBSTACLE_FOUND = -1
-STEP_DODGE_DRAGON = 1000 # step to start dodging dragonfly, can be tuned based on when the dragonfly appears in the vision
+STEP_DRAGON_BOOST = 1000  # steps with boosted locomotion speed after detection
+DRAGON_SPEED_FACTOR = 1.0  # multiply locomotion drive during boost (sensor rate unchanged)
 DRAGON_FLY_DETECTION_THRESHOLD = 100 # threshold to detect when dragonfly head turn fully red, can be tuned based on the vision observation of the dragonfly head
-SHOW_DRAGONFLY_DETECTION = False # set to True to visualize the dragonfly head detection process, which can help to tune the STEP_DODGE_DRAGON and DRAGON_FLY_DETECTION_THRESHOLD parameters
+SHOW_DRAGONFLY_DETECTION = False # set to True to visualize the dragonfly head detection process, which can help to tune STEP_DRAGON_BOOST and DRAGON_FLY_DETECTION_THRESHOLD
 class State(Enum):
     FOLLOW_SCENT = auto()
     AVOID_OBSTACLE = auto()
@@ -61,13 +62,13 @@ class Controller:
         self._last_roi_h = 1
         self._seen_soft_active = False
         self._seen_soft_vec = np.array([2.0, 2.0])
-        self._step_dodging_dragon = 0
+        self._dragon_boost_remaining = 0
         self.current_step = 0
         self.print_freq = PRINT_FREQ
 
     def step(self, sim: MiniprojectSimulation, step):
         if step >45000: 
-            self.print_freq = 500
+            self.print_freq = 2000
         self.current_step = step
         self.show_prints = SHOW_PRINTS and step % self.print_freq == 0
 
@@ -115,58 +116,54 @@ class Controller:
             if obstacle_threat:
                 self.avoid_drive = self.avoid_obstacle(left_h, right_h, left_w, right_w)
                 self.avoid_hold = AVOID_HOLD_STEPS
-            left_eye_score, right_eye_score, head_detected = self.detect_dragonflyhead(sim, step)
+            left_eye_score, right_eye_score, head_detected = self.detect_dragonflyhead(
+                sim, step
+            )
             if self.show_prints and step % self.print_freq == 0:
-                print(f"Dragonfly head scores: Left={left_eye_score}, Right={right_eye_score}, Detected={head_detected}")
-        
-            if left_eye_score > right_eye_score : 
-                if left_eye_score > DRAGON_FLY_DETECTION_THRESHOLD: # threshold to detect when dragonfly head turn fully red 
-                    #print(f"Dragonfly head detected on the left eye! Starting dodge maneuver.")
-                    self.state = State.DODGE_DRAGON
-            else:
-                if right_eye_score > DRAGON_FLY_DETECTION_THRESHOLD: # threshold to detect when dragonfly head turn fully red 
-                    #print(f"Dragonfly head detected on the right eye! Starting dodge maneuver.")
-                    self.state = State.DODGE_DRAGON
-            
-            if self._step_dodging_dragon <= STEP_DODGE_DRAGON :
-                if self.show_prints and self._step_dodging_dragon == 0:
-                    print(f"Dragonfly head detected! Starting dodge maneuver.")
-                self._step_dodging_dragon += 5
-                #print(f"Dodging dragonfly... Step {self._step_dodging_dragon}/{STEP_DODGE_DRAGON}")
+                print(
+                    f"Dragonfly head scores: Left={left_eye_score}, "
+                    f"Right={right_eye_score}, Detected={head_detected}"
+                )
 
-                self.drive = np.array([-1,-1])  
-                joint_angles, adhesion = self.turning_controller.step(self.drive)
-                return joint_angles, adhesion
-            if self._step_dodging_dragon > STEP_DODGE_DRAGON and self.state == State.DODGE_DRAGON:
+            if left_eye_score > right_eye_score:
+                dragon_detected = left_eye_score > DRAGON_FLY_DETECTION_THRESHOLD
+            else:
+                dragon_detected = right_eye_score > DRAGON_FLY_DETECTION_THRESHOLD
+
+            if dragon_detected:
                 if self.show_prints:
-                    print(f"Finished dodge maneuver. Resuming normal behavior.")
-                self.state = State.FOLLOW_SCENT
-                self._step_dodging_dragon = 0
-        if self.state != State.DODGE_DRAGON:
-            self.follow_pure = self.follow_scent()
-            s_soft = OBSTACLE_SEEN_SOFT_BLEND if self._seen_soft_active else 0.0
-            self.follow_drive = (1.0 - s_soft) * self.follow_pure + s_soft * self._seen_soft_vec
+                    print(
+                        "Dragonfly head detected! "
+                        f"Speed x{DRAGON_SPEED_FACTOR} for {STEP_DRAGON_BOOST} steps."
+                    )
+                self._dragon_boost_remaining = STEP_DRAGON_BOOST
 
-            if self.avoid_hold > 0:
-                self.avoid_hold -= 1
+        self.follow_pure = self.follow_scent()
+        s_soft = OBSTACLE_SEEN_SOFT_BLEND if self._seen_soft_active else 0.0
+        self.follow_drive = (1.0 - s_soft) * self.follow_pure + s_soft * self._seen_soft_vec
 
-            if self.avoid_hold > 0:
-                self.state = State.AVOID_OBSTACLE
-                #rh = max(float(self._last_roi_h), 1.0)
-                #closeness = float(np.clip(1.0 - (self._last_y_top / rh), 0.0, 1.0))
-                #b = AVOID_ODOR_BLEND_AT_BOUNDARY + (
-                #    AVOID_ODOR_BLEND_WHEN_CLOSE - AVOID_ODOR_BLEND_AT_BOUNDARY
-                #) * closeness
-                #b = max(b, 0.8)# ensure we still have a strong avoidance component even when the obstacle is at the edge of the threat zone
-                b = self.closeness
-                # Use follow_pure so odor toward banana is not diluted by soft avoidance twice.
-                self.drive = b * self.avoid_drive + (1.0 - b) * self.follow_pure
-                if self.show_prints and step % self.print_freq == 0:
+        if self.avoid_hold > 0:
+            self.avoid_hold -= 1
 
-                    print(f"Avoid_drive: {self.avoid_drive}, follow_pure: {self.follow_pure}, blend: {b:.2f}, resulting drive: {self.drive}")
-            else:
-                self.state = State.FOLLOW_SCENT
-                self.drive = self.follow_drive
+        if self.avoid_hold > 0:
+            self.state = State.AVOID_OBSTACLE
+            b = self.closeness
+            base_drive = b * self.avoid_drive + (1.0 - b) * self.follow_pure
+            if self.show_prints and step % self.print_freq == 0:
+                print(
+                    f"Avoid_drive: {self.avoid_drive}, follow_pure: {self.follow_pure}, "
+                    f"blend: {b:.2f}, resulting drive: {base_drive}"
+                )
+        else:
+            self.state = State.FOLLOW_SCENT
+            base_drive = self.follow_drive
+
+        if self._dragon_boost_remaining > 0:
+            self.state = State.DODGE_DRAGON
+            self.drive = DRAGON_SPEED_FACTOR * base_drive
+            self._dragon_boost_remaining -= 1
+        else:
+            self.drive = base_drive
         
 
         if step > 0 and self.show_prints:
@@ -181,7 +178,9 @@ class Controller:
 
         return joint_angles, adhesion
 
-    def detect_obstacle(self, sim, visualize=False):
+    def detect_obstacle(
+        self, sim, visualize=False, save_path=None, eye_titles=None, english=False
+    ):
         """
         Détecte les obstacles verts en balayant l'image de haut en bas.
         Retourne la "hauteur" (coordonnée Y depuis le haut) de la première 
@@ -277,7 +276,13 @@ class Controller:
                 print("ends - starts", ends - starts)
 
         if visualize and obstacle_seen:
-            self.visualize_detection(debug_info, heights)
+            self.visualize_detection(
+                debug_info,
+                heights,
+                save_path=save_path,
+                eye_titles=eye_titles,
+                english=english,
+            )
 
         return (
             heights[0],
@@ -352,14 +357,28 @@ class Controller:
 
     
 
-    def visualize_detection(self, debug_info, heights):
+    def visualize_detection(
+        self, debug_info, heights, save_path=None, eye_titles=None, english=False
+    ):
         """
-        Affiche 4 graphiques : Les 2 images originales avec le cadre rouge, 
+        Affiche 4 graphiques : Les 2 images originales avec le cadre rouge,
         et les 2 masques verts avec une ligne/bande bleue indiquant la détection.
+        If save_path is set, writes the figure to disk instead of plt.show().
         """
         fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-        titles = ["Œil Gauche", "Œil Droit"]
-        
+        if english:
+            titles = eye_titles or ["Left eye", "Right eye"]
+            title_raw = "compound eye (sky ROI)"
+            title_mask = "green mask (sky ROI)"
+            label_detected = "Detected blade top (y={y})"
+            text_none = "No blade detected"
+        else:
+            titles = eye_titles or ["Œil Gauche", "Œil Droit"]
+            title_raw = "Image Originale"
+            title_mask = "Masque Vert (Rogné)"
+            label_detected = "Haut détecté (Y={y})"
+            text_none = "Rien détecté"
+
         for i in range(2):
             img = debug_info['imgs'][i]
             mask = debug_info['masks'][i]
@@ -368,15 +387,19 @@ class Controller:
 
             ax_img = axes[0, i]
             ax_img.imshow(img)
-            ax_img.set_title(f"step : {self.current_step} - {titles[i]} - Image Originale")
-            
+            ax_img.set_title(
+                f"Step {self.current_step} — {titles[i]} — {title_raw}"
+            )
+
             rect = patches.Rectangle((box_x, box_y), box_w, box_h, 
                                      linewidth=2, edgecolor='red', facecolor='none', linestyle='--')
             ax_img.add_patch(rect)
             
             ax_mask = axes[1, i]
             ax_mask.imshow(mask, cmap='gray', vmin=0, vmax=1)
-            ax_mask.set_title(f"step : {self.current_step} - {titles[i]} - Masque Vert (Rogné)")
+            ax_mask.set_title(
+                f"Step {self.current_step} — {titles[i]} — {title_mask}"
+            )
             
             if detected_y != NO_OBSTACLE_FOUND:
                 rect_band = patches.Rectangle((0, detected_y), box_w, SWEEP_HEIGHT, 
@@ -384,17 +407,24 @@ class Controller:
                 ax_mask.add_patch(rect_band)
                 
                 ax_mask.axhline(detected_y, color='blue', linestyle='-', linewidth=2, 
-                                label=f"Haut détecté (Y={detected_y})")
+                                label=label_detected.format(y=detected_y))
                 
                 ax_img.hlines(y=detected_y, xmin=box_x, xmax=box_x+box_w, colors='blue', linewidth=2)
                 
                 ax_mask.legend(loc="lower right")
             else:
-                ax_mask.text(box_w/2, box_h/2, "Rien détecté", color='red', 
+                ax_mask.text(box_w/2, box_h/2, text_none, color='red', 
                              ha='center', va='center', fontsize=12, fontweight='bold')
 
         plt.tight_layout()
-        plt.show()
+        if save_path:
+            from pathlib import Path
+
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(save_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+        else:
+            plt.show()
 
     def avoid_obstacle(self, left_h, right_h, left_w=0.0, right_w=0.0):
         """Turn away from grass. Uses both eyes when possible; handles single-eye detection."""
@@ -444,7 +474,7 @@ class Controller:
                 print("Obstacle très proche → évitement serré mais toujours en avant")
         elif y_near < OBSTACLE_ROW_CLOSE * 2:
             fast, slow = 1.10, 0.08
-            self.closeness = 0.8
+            self.closeness = 0.9
             if self.show_prints:
                 print("Obstacle proche → évitement modéré avec moins d'avance")
         else:
